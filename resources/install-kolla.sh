@@ -146,41 +146,27 @@ function configure_firewall() {
 }
 
 function configure_ovs_bridge() {
+    docker exec -ti -u root neutron_server pip install --upgrade pip
+    docker exec -ti -u root neutron_server pip install wheel
+    docker exec -ti -u root neutron_server pip install "networking-hyperv<=4.0.0"
+    docker restart neutron_server
 
     # create OVS data bridge
-    docker exec --privileged openvswitch_vswitchd ovs-vsctl add-br br-data
-    docker exec --privileged openvswitch_vswitchd ovs-vsctl add-port br-data $DATA_IFACE
-    docker exec --privileged openvswitch_vswitchd ovs-vsctl add-port br-data phy-br-data || true
-    docker exec --privileged openvswitch_vswitchd ovs-vsctl set interface phy-br-data type=patch
-    docker exec --privileged openvswitch_vswitchd ovs-vsctl add-port br-int int-br-data || true
-    docker exec --privileged openvswitch_vswitchd ovs-vsctl set interface int-br-data type=patch
-    docker exec --privileged openvswitch_vswitchd ovs-vsctl set interface phy-br-data options:peer=int-br-data
-    docker exec --privileged openvswitch_vswitchd ovs-vsctl set interface int-br-data options:peer=phy-br-data
+    docker exec -ti -u root openvswitch_vswitchd ovs-vsctl add-br br-data
+    docker exec -ti -u root openvswitch_vswitchd ovs-vsctl add-port br-data $DATA_IFACE
+    docker exec -ti -u root openvswitch_vswitchd ovs-vsctl add-port br-data phy-br-data || true
+    docker exec -ti -u root openvswitch_vswitchd ovs-vsctl set interface phy-br-data type=patch
+    docker exec -ti -u root openvswitch_vswitchd ovs-vsctl add-port br-int int-br-data || true
+    docker exec -ti -u root openvswitch_vswitchd ovs-vsctl set interface int-br-data type=patch
+    docker exec -ti -u root openvswitch_vswitchd ovs-vsctl set interface phy-br-data options:peer=int-br-data
+    docker exec -ti -u root openvswitch_vswitchd ovs-vsctl set interface int-br-data options:peer=phy-br-data
 
     # configure ML2 plugin for neutron 
     for conf_file in /etc/kolla/neutron-server/ml2_conf.ini /etc/kolla/neutron-openvswitch-agent/ml2_conf.ini
     do
-        cat << EOF > $conf_file
-[ml2]
-type_drivers = flat,vlan
-tenant_network_types = flat,vlan
-mechanism_drivers = openvswitch,hyperv
-extension_drivers = port_security
-
-[ml2_type_vlan]
-network_vlan_ranges = physnet2:500:2000
-
-[ml2_type_flat]
-flat_networks = physnet1, physnet2
-
-[securitygroup]
-firewall_driver = neutron.agent.linux.iptables_firewall.OVSHybridIptablesFirewallDriver
-
-[ovs]
-bridge_mappings = physnet1:br-ex,physnet2:br-data
-ovsdb_connection = tcp:$HOST_IP:6640
-local_ip = $HOST_IP
-EOF
+        sed -i '/bridge_mappings/c\bridge_mappings = physnet1:br-ex,physnet2:br-data' $conf_file
+        sed -i '/flat_networks/c\flat_networks = physnet1,physnet2' $conf_file
+        sed -i '/network_vlan_ranges/c\network_vlan_ranges = physnet2:500:2000' $conf_file
     done
 
     exec_with_retry 5 0 docker restart neutron_server neutron_openvswitch_agent
@@ -235,8 +221,12 @@ function configure_router() {
 }
 
 function create_nova_flavors() {
-    exec_with_retry 5 0 /usr/bin/nova flavor-create m1.nano 42 96 1 1
-    exec_with_retry 5 0 /usr/bin/nova flavor-create m1.micro 84 128 2 1
+    exec_with_retry 5 0 nova flavor-create m1.nano 11 96 1 1
+    exec_with_retry 5 0 nova flavor-create m1.tiny 1 512 1 1
+    exec_with_retry 5 0 nova flavor-create m1.small 2 2048 20 1
+    exec_with_retry 5 0 nova flavor-create m1.medium 3 4096 40 2
+    exec_with_retry 5 0 nova flavor-create m1.large 5 8192 80 4
+    exec_with_retry 5 0 nova flavor-create m1.xlarge 6 16384 160 8
 }
 
 function create_demo_user() {
@@ -246,14 +236,13 @@ function create_demo_user() {
 }
 
 function apply_cloudbase_theme() {
+    #sed -i '13s/.*/COMPRESS_OFFLINE = False/' /etc/kolla/horizon/local_settings
     cat << EOF >> /etc/kolla/horizon/local_settings
 AVAILABLE_THEMES = [
-        (
-                'cloudbase','Cloudbase','themes/cloudbase'
-        ),
+        ('cloudbase','Cloudbase','themes/cloudbase'),
+        ('default', 'Default', 'themes/default'),
 ]
 EOF
-    
     docker restart horizon
 }
 
@@ -267,6 +256,17 @@ ansible_password="'$HYPERV_PASSWORD'" \
 ansible_port=5986 \
 ansible_connection=winrm \
 ansible_winrm_server_cert_validation=ignore' /usr/share/kolla-ansible/ansible/inventory/all-in-one
+
+    sed -i '/hyperv]/a\
+"'$WINDOWS_HOST_IP'"' /usr/share/kolla-ansible/ansible/inventory/all-in-one
+
+    sed -i '/hyperv:vars/a\
+ansible_user="'$HYPERV_USERNAME'" \
+ansible_password="'$HYPERV_PASSWORD'" \
+ansible_port=5986 \
+ansible_connection=winrm \
+ansible_winrm_server_cert_validation=ignore' /usr/share/kolla-ansible/ansible/inventory/all-in-one
+
 }
 
 ADMIN_PASSWORD=$1
@@ -388,26 +388,30 @@ cp -r /root/kolla-ansible/etc/kolla /etc/
 
 
 # Configure globals.yml for Kolla
-sed -i '/#docker_namespace/i docker_namespace: "'$DOCKER_NAMESPACE'"' /etc/kolla/globals.yml
-sed -i '/#openstack_release/i openstack_release: "'$KOLLA_OPENSTACK_VERSION'"' /etc/kolla/globals.yml
+#sed -i '/docker_namespace/c\docker_namespace: "'$DOCKER_NAMESPACE'"' /etc/kolla/globals.yml
+sed -i '/kolla_base_distro/c\kolla_base_distro: "centos"' /etc/kolla/globals.yml
+sed -i '/kolla_install_type/c\kolla_install_type: "source"' /etc/kolla/globals.yml
+sed -i '/openstack_release/c\openstack_release: "'$KOLLA_OPENSTACK_VERSION'"' /etc/kolla/globals.yml
 sed -i 's/^kolla_internal_vip_address:\s.*$/kolla_internal_vip_address: "'$KOLLA_INTERNAL_VIP_ADDRESS'"/g' /etc/kolla/globals.yml
-sed -i '/#network_interface/i network_interface: "'$MGMT_IFACE'"' /etc/kolla/globals.yml
-sed -i '/#neutron_external_interface/i neutron_external_interface: "'$EXT_IFACE'"' /etc/kolla/globals.yml
+sed -i '/#network_interface:/c\network_interface: "'$MGMT_IFACE'"' /etc/kolla/globals.yml
+sed -i '/#neutron_external_interface:/c\neutron_external_interface: "'$EXT_IFACE'"' /etc/kolla/globals.yml
 
 # set admin password
 sed -i '/keystone_admin_password/c\keystone_admin_password: "'$ADMIN_PASSWORD'"' /etc/kolla/passwords.yml
 
 # enable cinder
-sed -i '/#enable_cinder:/i enable_cinder: "yes"' /etc/kolla/globals.yml
-sed -i '/#enable_cinder_backend_lvm/i enable_cinder_backend_lvm: "yes"' /etc/kolla/globals.yml
-sed -i '/#cinder_volume_group/i cinder_volume_group: "cinder-volumes"' /etc/kolla/globals.yml
+sed -i '/#enable_cinder:/c\enable_cinder: "yes"' /etc/kolla/globals.yml
+sed -i '/#enable_cinder_backend_lvm:/c\enable_cinder_backend_lvm: "yes"' /etc/kolla/globals.yml
+sed -i '/#cinder_volume_group:/c\cinder_volume_group: "cinder-volumes"' /etc/kolla/globals.yml
+
+#sed -i '/enable_magnum:/c\enable_magnum: "yes"' /etc/kolla/globals.yml
 
 # hyperv setup
-sed -i '/#enable_hyperv/i enable_hyperv: "yes"' /etc/kolla/globals.yml
-sed -i '/#hyperv_username/i hyperv_username: "'$HYPERV_USERNAME'"' /etc/kolla/globals.yml
-sed -i '/#hyperv_password/i hyperv_password: "'$HYPERV_PASSWORD'"' /etc/kolla/globals.yml
-sed -i '/#vswitch_name/i vswitch_name: "v-magine-data"' /etc/kolla/globals.yml
-sed -i '/#nova_msi_url/i nova_msi_url: "https://cloudbase.it/downloads/HyperVNovaCompute_Ocata_15_0_0.msi"' /etc/kolla/globals.yml
+sed -i '/enable_hyperv/c\enable_hyperv: "yes"' /etc/kolla/globals.yml
+sed -i '/hyperv_username/c\hyperv_username: "'$HYPERV_USERNAME'"' /etc/kolla/globals.yml
+sed -i '/hyperv_password/c\hyperv_password: "'$HYPERV_PASSWORD'"' /etc/kolla/globals.yml
+sed -i '/vswitch_name/c\vswitch_name: "v-magine-data"' /etc/kolla/globals.yml
+sed -i '/nova_msi_url/c\nova_msi_url: "https://cloudbase.it/downloads/HyperVNovaCompute_Ocata_15_0_0.msi"' /etc/kolla/globals.yml
 
 exec_with_retry 5 0 systemctl restart docker
 exec_with_retry 5 0 systemctl enable docker
@@ -422,7 +426,6 @@ if [ `docker images | wc -l` -lt 10 ]
 then
     exec_with_retry 5 0 kolla-ansible pull
 fi
-
 
 exec_with_retry 5 0 kolla-genpwd
 
@@ -446,9 +449,11 @@ configure_private_net_subnet
 configure_router
 create_nova_flavors
 create_demo_user
-apply_cloudbase_theme
+#apply_cloudbase_theme
 remove_kvm_containers
 
 exec_with_retry 5 0 docker restart neutron_server neutron_openvswitch_agent neutron_dhcp_agent openvswitch_vswitchd openvswitch_db
+
+exec_with_retry 5 0 docker restart horizon
 
 echo "Done!"
