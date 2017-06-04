@@ -247,16 +247,6 @@ EOF
 }
 
 function add_hyperv_to_inventory() {
-    sed -i '18 i\[hyperv] \
-"'$WINDOWS_HOST_IP'" \
-\
-[hyperv:vars] \
-ansible_user="'$HYPERV_USERNAME'" \
-ansible_password="'$HYPERV_PASSWORD'" \
-ansible_port=5986 \
-ansible_connection=winrm \
-ansible_winrm_server_cert_validation=ignore' /usr/share/kolla-ansible/ansible/inventory/all-in-one
-
     sed -i '/hyperv]/a\
 "'$WINDOWS_HOST_IP'"' /usr/share/kolla-ansible/ansible/inventory/all-in-one
 

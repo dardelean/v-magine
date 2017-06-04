@@ -181,13 +181,13 @@ class Worker(object):
         vm_dir = os.path.join(openstack_base_dir, vm_name)
 
         # TODO(alexpilotti): Add support for more OSs
-        pxe_os_id = "centos7"
+        pxe_os_id = "ubuntu16"
         console_named_pipe = r"\\.\pipe\%s" % vm_name
 
         iso_path = os.path.join(vm_dir, "ks.iso")
 
-        self._dep_actions.activate_iscsi_initiator()
-        self._dep_actions.enable_ansible_on_host()
+        #self._dep_actions.activate_iscsi_initiator()
+        #self._dep_actions.enable_ansible_on_host()
 
         self._update_status('Generating SSH key...')
         (ssh_key_path,
@@ -658,8 +658,8 @@ class Worker(object):
             hyperv_host_password = args.get("hyperv_host_password")
             
             # HACK, need to get those 2 from GUI
-            kolla_vip='10.7.15.22'
-            windows_host_ip='10.7.15.20'
+            kolla_vip='192.168.11.11'
+            windows_host_ip='192.168.0.6'
 
             fip_range = str(netaddr.IPNetwork(args.get("fip_range")).cidr)
             fip_range_start = str(netaddr.IPAddress(

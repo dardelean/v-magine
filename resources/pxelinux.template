@@ -1,12 +1,18 @@
-default menu.c32
+# D-I config version 2.0
+# search path for the c32 support libraries (libcom32, libutil etc.)
+path ubuntu-installer/amd64/boot-screens/
+include ubuntu-installer/amd64/boot-screens/menu.cfg
+default ubuntu-installer/amd64/boot-screens/vesamenu.c32
 prompt 0
 timeout 1
 ontimeout ks-net
 menu title PXE Network Boot
-menu hidden
-serial 0 115200
+#menu hidden
+console 0
+#serial 0 19200 0
+#serial 0 115200
 
 label ks-net
-  menu label ^Network install
-  kernel vmlinuz text console=tty0 console=ttyS0,115200n8 utf8 BOOTIF={{ mgmt_ext_mac_address }} consoleblank=0
-  append initrd=initrd.img ro inst.ks=cdrom:/ks.cfg inst.repo={{ inst_repo }} ksdevice={{ mgmt_ext_mac_address }} ramdisk_size=100000 {% if proxy_url %} proxy="{{ proxy_url }}" {% endif %} {% if mgmt_ext_ip %} ip={{ mgmt_ext_ip }} netmask={{ mgmt_ext_netmask }} gateway={{ mgmt_ext_gateway }} dns={{ mgmt_ext_dns1 }} {% endif %}
+        menu label ^Install
+        kernel ubuntu-installer/amd64/linux
+        append initrd=ubuntu-installer/amd64/initrd.gz console=ttyS0,19200 earlyprint=serial,ttyS0,19200 keyboard-configuration/layoutcode=us ipv6.disable=1 hostname=controller auto=true priority=critical interface=enp0s10f0 preseed=cdrom:/ubuntu/ubuntu.seed DEBCONF_DEBUG=5 vga=normal --
