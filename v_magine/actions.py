@@ -7,15 +7,18 @@ import logging
 import os
 import socket
 import sys
+import threading
 
 from oslo_utils import units
 from six.moves.urllib import request
 
 from v_magine import config
 from v_magine import constants
-from v_magine import kickstart
+from v_magine import preseed
 from v_magine import pybootdmgr
+from v_magine import httpd
 from v_magine import security
+
 from v_magine import utils
 from v_magine import windows
 from v_magine.virt import base as base_virt_driver
@@ -33,11 +36,6 @@ FIREWALL_PXE_RULE_NAME = "%s PXE" % constants.PRODUCT_NAME
 DHCP_PORT = 67
 TFTP_PORT = 69
 
-FREERDP_WEBCONNECT_SERVICE_USER = "FreeRDP-WebConnect"
-
-FREERDP_WEBCONNECT_HTTP_PORT = 8000
-FREERDP_WEBCONNECT_HTTPS_PORT = 4430
-
 OPENSTACK_MAX_VM_MEM_MB = 16 * 1024
 OPENSTACK_MAX_VM_RECOMMENDED_MEM_MB = 6 * 1024
 OPENSTACK_VM_MIN_MEM_MB = int(2.5 * 1024)
@@ -48,14 +46,6 @@ OPENSTACK_MIN_INSTANCES_MEM_MB = 256
 OPENSTACK_VM_VHD_MAX_SIZE = 60 * units.Gi
 
 DATA_VLAN_RANGE = range(500, 2000)
-
-HYPERV_MSI_VENDOR = "Cloudbase Solutions Srl"
-HYPERV_MSI_CAPTION_PREFIX = 'OpenStack Hyper-V'
-FREERDP_WEBCONNECT_CAPTION_PREFIX = "FreeRDP-WebConnect"
-HYPERV_MSI_URL = ("https://www.cloudbase.it/downloads/"
-                  "HyperVNovaCompute_Newton_14_0_1.msi")
-FREERDP_WEBCONNECT_MSI_URL = ("https://www.cloudbase.it/downloads/"
-                              "FreeRDPWebConnect.msi")
 
 OPENSTACK_INSTANCES_DIR = "Instances"
 OPENSTACK_LOG_DIR = "Log"
@@ -73,6 +63,8 @@ class DeploymentActions(object):
         self._windows_utils = windows.WindowsUtils()
         self._config = config.AppConfig()
         self._vm_name = None
+        self._httpd_service = None
+        self._httpd_thread = None
 
     def check_installed_components(self):
         installed_products = []
@@ -138,7 +130,7 @@ class DeploymentActions(object):
         encoded_cmd = self._get_powershell_encoded_cmd(
             '$host.ui.RawUI.WindowTitle = "%(title)s"; '
             '& "%(ssh_path)s" -o StrictHostKeyChecking=no -i "%(key_path)s" '
-            '%(user)s@%(host)s -t bash --rcfile keystonerc_admin -i' %
+            '%(user)s@%(host)s -t bash --rcfile /etc/kolla/admin-openrc.sh -i' %
             {"title": title, "ssh_path": ssh_path, "key_path": key_path,
              "user": ssh_user, "host": host_address})
 
@@ -153,54 +145,18 @@ class DeploymentActions(object):
     def uninstall_product(self, product_id, log_file):
         self._windows_utils.uninstall_product(product_id, log_file)
 
-    @utils.retry_on_error()
-    def download_hyperv_compute_msi(self, target_path):
-        utils.download_file(HYPERV_MSI_URL, target_path)
+    def restart_nova_neutron(self):
+        self._windows_utils.restart_nova_neutron()
 
-    @utils.retry_on_error()
-    def download_freerdp_webconnect_msi(self, target_path):
-        utils.download_file(FREERDP_WEBCONNECT_MSI_URL, target_path)
+    def activate_iscsi_initiator(self):
+        self._windows_utils.activate_iscsi_initiator()
+
+    def enable_ansible_on_host(self):
+        self._windows_utils.enable_ansible_on_host()
 
     @staticmethod
     def _get_keystone_v2_url(auth_url):
         return auth_url[:-2] + "v2.0" if auth_url.endswith("v3") else auth_url
-
-    def install_freerdp_webconnect(self, msi_path, nova_config,
-                                   hyperv_host_username,
-                                   hyperv_host_password):
-
-        features = ['FreeRDPWebConnect', 'VC120Redist']
-        properties = {}
-
-        # properties["REDIRECT_HTTPS"] = "1"
-
-        properties["HTTP_PORT"] = FREERDP_WEBCONNECT_HTTP_PORT
-        properties["HTTPS_PORT"] = FREERDP_WEBCONNECT_HTTPS_PORT
-        properties["ENABLE_FIREWALL_RULES"] = "1"
-
-        properties["OPENSTACK_AUTH_URL"] = self._get_keystone_v2_url(
-            nova_config["neutron"]["auth_url"])
-        properties["OPENSTACK_TENANT_NAME"] = nova_config[
-            "keystone_authtoken"]["project_name"]
-        properties["OPENSTACK_USERNAME"] = nova_config["keystone_authtoken"][
-            "username"]
-        properties["OPENSTACK_PASSWORD"] = nova_config["keystone_authtoken"][
-            "password"]
-
-        properties["HYPERV_HOST_USERNAME"] = hyperv_host_username
-        properties["HYPERV_HOST_PASSWORD"] = hyperv_host_password
-
-        LOG.info("Installing FreeRDP-WebConnect")
-        self._windows_utils.install_msi(msi_path, features, properties,
-                                        "freerdp_webconnect.log")
-        LOG.info("FreeRDP-WebConnect installed")
-
-        LOG.info("Adding FreeRDP-WebConnect user to Remote Desktop Users")
-        # This is needed on client OS
-        group_domain, group_name = self._windows_utils.get_group_by_sid(
-            windows.GROUP_SID_REMOTE_DESKTOP_USERS)
-        self._windows_utils.add_user_to_local_group(
-            FREERDP_WEBCONNECT_SERVICE_USER, group_name)
 
     def _check_username(self, username):
         username = username.strip()
@@ -215,72 +171,6 @@ class DeploymentActions(object):
         if not self._windows_utils.open_url(url):
             self._windows_utils.run_safe_process(
                 sys.executable, "openurl %s" % url)
-
-    def install_hyperv_compute(self, msi_path, nova_config,
-                               openstack_base_dir, hyperv_host_username,
-                               hyperv_host_password):
-        instances_path = os.path.join(openstack_base_dir,
-                                      OPENSTACK_INSTANCES_DIR)
-        openstack_log_dir = os.path.join(openstack_base_dir, OPENSTACK_LOG_DIR)
-
-        features = ["HyperVNovaCompute", "NeutronHyperVAgent",
-                    "iSCSISWInitiator", "FreeRDP"]
-
-        properties = {}
-        properties["RPCBACKEND"] = "RabbitMQ"
-
-        properties["RPCBACKENDHOST"] = nova_config["oslo_messaging_rabbit"][
-            "rabbit_host"]
-        properties["RPCBACKENDPORT"] = nova_config["oslo_messaging_rabbit"][
-            "rabbit_port"]
-
-        glance_hosts = nova_config["glance"]["api_servers"]
-        (glance_host, glance_port) = glance_hosts.split(",")[0].split(':')
-
-        properties["GLANCEHOST"] = glance_host
-        properties["GLANCEPORT"] = glance_port
-
-        properties["INSTANCESPATH"] = instances_path
-        properties["LOGDIR"] = openstack_log_dir
-
-        rdp_console_url = "http://%(host)s:%(port)d" % {
-            "host": socket.gethostname(),
-            "port": FREERDP_WEBCONNECT_HTTP_PORT}
-
-        properties["RDPCONSOLEURL"] = rdp_console_url
-
-        properties["ADDVSWITCH"] = "0"
-        properties["VSWITCHNAME"] = VSWITCH_DATA_NAME
-
-        properties["USECOWIMAGES"] = "1"
-        properties["FORCECONFIGDRIVE"] = "1"
-        properties["CONFIGDRIVEINJECTPASSWORD"] = "1"
-        properties["DYNAMICMEMORYRATIO"] = "1"
-        properties["ENABLELOGGING"] = "1"
-        properties["VERBOSELOGGING"] = "1"
-
-        properties["NEUTRONURL"] = nova_config["neutron"]["url"]
-        properties["NEUTRONADMINTENANTNAME"] = nova_config["neutron"][
-            "project_name"]
-        properties["NEUTRONADMINUSERNAME"] = nova_config["neutron"][
-            "username"]
-        properties["NEUTRONADMINPASSWORD"] = nova_config["neutron"][
-            "password"]
-        properties["NEUTRONADMINAUTHURL"] = nova_config["neutron"][
-            "auth_url"]
-
-        if hyperv_host_username:
-            properties["NOVACOMPUTESERVICEUSER"] = self._check_username(
-                hyperv_host_username)
-            properties["NOVACOMPUTESERVICEPASSWORD"] = hyperv_host_password
-
-        if not os.path.exists(openstack_log_dir):
-            os.makedirs(openstack_log_dir)
-
-        LOG.info("Installing Nova compute")
-        self._windows_utils.install_msi(msi_path, features, properties,
-                                        "nova_install.log")
-        LOG.info("Nova compute installed")
 
     @staticmethod
     def get_openstack_vm_recommended_vcpu_count():
@@ -355,10 +245,10 @@ class DeploymentActions(object):
         # vmswitch_name, vmnic_name, mac_address, pxe, allow_mac_spoofing,
         # access_vlan_id, trunk_vlan_ids, private_vlan_id
         vm_network_config = [
-            (external_vswitch_name, "%s-mgmt-ext" % vm_name,
+            (external_vswitch_name, "%s-mgmt_ext" % vm_name,
              utils.get_random_mac_address(),
              False, False, None, None, None),
-            (VSWITCH_INTERNAL_NAME, "%s-mgmt-int" % vm_name,
+            (VSWITCH_INTERNAL_NAME, "%s-mgmt_int" % vm_name,
              utils.get_random_mac_address(),
              False, False, None, None, None),
             (VSWITCH_DATA_NAME, "%s-data" % vm_name,
@@ -393,6 +283,9 @@ class DeploymentActions(object):
                                     console_named_pipe)
         self._vm_name = vm_name
 
+    def attach_nics(self, vm_name, vm_network_config):
+        self._virt_driver.attach_vm_nics(vm_name, vm_network_config)
+
     def get_available_host_nics(self):
         return [nic for nic in self._virt_driver.get_host_nics()
                 if not nic["in_use"]]
@@ -409,6 +302,9 @@ class DeploymentActions(object):
 
     def reboot_openstack_vm(self):
         self._virt_driver.reboot_vm(self._vm_name)
+
+    def poweroff_openstack_vm(self):
+        self._virt_driver.power_off_vm(self._vm_name)
 
     def get_internal_network_config(self):
         subnet = utils.get_random_ipv4_subnet()
@@ -438,11 +334,11 @@ class DeploymentActions(object):
         [vnic_ip_info.append((vif_config[1], vif_config[2],
                               base_addr + str(last_octet)))
             for vif_config in vm_network_config
-         if vif_config[1] == "%s-mgmt-int" % self._vm_name]
+         if vif_config[1] == "%s-mgmt_int" % self._vm_name]
 
         return vnic_ip_info
 
-    def create_kickstart_image(self, ks_image_path, encrypted_password,
+    def create_preseed_file(self, encrypted_password,
                                mgmt_ext_mac_address, mgmt_int_mac_address,
                                data_mac_address, ext_mac_address, inst_repo,
                                ssh_pub_key_path, mgmt_ext_ip, mgmt_ext_netmask,
@@ -460,8 +356,7 @@ class DeploymentActions(object):
         mgmt_ext_dns1, mgmt_ext_dns2 = self._get_primary_secondary_dns(
             mgmt_ext_name_servers)
 
-        kickstart.generate_kickstart_image(
-            ks_image_path,
+        preseed.generate_preseed_files(
             {"encrypted_password": encrypted_password,
              "mgmt_ext_mac_address": _format_udev_mac(mgmt_ext_mac_address),
              "mgmt_int_mac_address": _format_udev_mac(mgmt_int_mac_address),
@@ -544,3 +439,23 @@ class DeploymentActions(object):
         # localhost_version_info['hostname'] = socket.gethostname()
         localhost_version_info['hypervisor_type'] = HYPERVISOR_TYPE_HYPERV
         return [localhost_version_info]
+
+    def start_httpd(self, interface_addr, port):
+        self._httpd_thread = threading.Thread(
+            target=self._run_http_service,
+            args=(interface_addr, port))
+        self._httpd_thread.daemon = True
+        self._httpd_thread.start()
+
+    def stop_httpd(self):
+        if self._httpd_service:
+            self._httpd_service.stop()
+            self._httpd_service = None
+        if self._httpd_thread:
+            self._httpd_thread.join()
+            self._httpd_thread = None
+
+    def _run_http_service(self, interface_addr, port):
+        self._httpd_service = httpd.SimpleHttpd()
+        self._httpd_service.start(interface_addr, port)
+        LOG.debug("HTTP service started")

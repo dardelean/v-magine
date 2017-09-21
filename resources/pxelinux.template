@@ -1,12 +1,14 @@
-default menu.c32
+path boot-screens/
+include boot-screens/menu.cfg
+default boot-screens/vesamenu.c32
 prompt 0
 timeout 1
-ontimeout ks-net
+ontimeout v-magine
 menu title PXE Network Boot
-menu hidden
-serial 0 115200
+console 0
+serial 0 19200 0
 
-label ks-net
-  menu label ^Network install
-  kernel vmlinuz text console=tty0 console=ttyS0,115200n8 utf8 BOOTIF={{ mgmt_ext_mac_address }} consoleblank=0
-  append initrd=initrd.img ro inst.ks=cdrom:/ks.cfg inst.repo={{ inst_repo }} ksdevice={{ mgmt_ext_mac_address }} ramdisk_size=100000 {% if proxy_url %} proxy="{{ proxy_url }}" {% endif %} {% if mgmt_ext_ip %} ip={{ mgmt_ext_ip }} netmask={{ mgmt_ext_netmask }} gateway={{ mgmt_ext_gateway }} dns={{ mgmt_ext_dns1 }} {% endif %}
+label v-magine
+        menu label ^Install
+        kernel linux
+        append vga=normal initrd=initrd.gz preseed/url=http://10.7.15.20/pxe/preseed.cfg debian-installer/locale=en_US console-setup/layoutcode=us keyboard-configuration/modelcode=pc105 keyboard-configuration/layoutcode=us interface=eth0 auto=true priority=critical --- console=ttyS0,19200 earlyprint=serial,ttyS0,19200

@@ -16,7 +16,7 @@ from v_magine import actions
 from v_magine import centos
 from v_magine import constants
 from v_magine import exceptions
-from v_magine import rdo
+from v_magine import kolla
 from v_magine import security
 from v_magine import utils
 
@@ -175,16 +175,20 @@ class Worker(object):
                              admin_password, repo_url,
                              mgmt_ext_ip, mgmt_ext_netmask,
                              mgmt_ext_gateway, mgmt_ext_name_servers,
-                             proxy_url, proxy_username, proxy_password):
+                             proxy_url, proxy_username, proxy_password, windows_host_ip):
+
         vm_name = OPENSTACK_CONTROLLER_VM_NAME
         vm_admin_user = "root"
         vm_dir = os.path.join(openstack_base_dir, vm_name)
 
+        HTTP_PORT = 80
+
         # TODO(alexpilotti): Add support for more OSs
-        pxe_os_id = "centos7"
+        pxe_os_id = "ubuntu16"
         console_named_pipe = r"\\.\pipe\%s" % vm_name
 
-        iso_path = os.path.join(vm_dir, "ks.iso")
+        self._dep_actions.activate_iscsi_initiator()
+        self._dep_actions.enable_ansible_on_host()
 
         self._update_status('Generating SSH key...')
         (ssh_key_path,
@@ -208,10 +212,21 @@ class Worker(object):
             vm_name, ext_vswitch_name)
         LOG.info("VNIC Network config: %s " % vm_network_config)
 
+        #initial_nics = ["openstack-controller-mgmt_ext", "openstack-controller-pxe"]
+        initial_nics = ["%s-mgmt_ext" % vm_name, "%s-pxe" % vm_name]
+
+        # because HyperV cannot guarantee NICs will be on desired order,
+        # have to attach only the necessary ones at install
+        vm_network_config_initial = []
+        for nic in vm_network_config:
+            if nic[1] in initial_nics:
+                vm_network_config_initial.append(nic)
+        LOG.info("Initial VNIC Network config: %s " % vm_network_config_initial)
+
         mgmt_ext_mac_address = self._get_mac_address(vm_network_config,
-                                                     "%s-mgmt-ext" % vm_name)
+                                                     "%s-mgmt_ext" % vm_name)
         mgmt_int_mac_address = self._get_mac_address(vm_network_config,
-                                                     "%s-mgmt-int" % vm_name)
+                                                     "%s-mgmt_int" % vm_name)
         data_mac_address = self._get_mac_address(vm_network_config,
                                                  "%s-data" % vm_name)
         ext_mac_address = self._get_mac_address(vm_network_config,
@@ -219,8 +234,8 @@ class Worker(object):
         pxe_mac_address = self._get_mac_address(vm_network_config,
                                                 "%s-pxe" % vm_name)
 
-        self._dep_actions.create_kickstart_image(
-            iso_path, encrypted_password, mgmt_ext_mac_address,
+        self._dep_actions.create_preseed_file(
+            encrypted_password, mgmt_ext_mac_address,
             mgmt_int_mac_address, data_mac_address, ext_mac_address,
             repo_url, ssh_pub_key_path, mgmt_ext_ip, mgmt_ext_netmask,
             mgmt_ext_gateway, mgmt_ext_name_servers, proxy_url,
@@ -229,8 +244,8 @@ class Worker(object):
         self._update_status('Creating the OpenStack controller VM...')
         self._dep_actions.create_openstack_vm(
             vm_name, vm_dir, openstack_vm_vcpu_count,
-            openstack_vm_mem_mb, None, iso_path,
-            vm_network_config, console_named_pipe)
+            openstack_vm_mem_mb, None, None,
+            vm_network_config_initial, console_named_pipe)
 
         vnic_ip_info = self._dep_actions.get_openstack_vm_ip_info(
             vm_network_config, internal_net_config["subnet"])
@@ -242,13 +257,17 @@ class Worker(object):
             internal_net_config["host_ip"],
             [vnic_ip[1:] for vnic_ip in vnic_ip_info], pxe_os_id)
 
+        self._update_status("Starting HTTP service")
+        self._dep_actions.start_httpd(
+            windows_host_ip, HTTP_PORT)
+
         self._dep_actions.generate_mac_pxelinux_cfg(
             pxe_mac_address, mgmt_ext_mac_address.replace('-', ':'),
             repo_url, mgmt_ext_ip, mgmt_ext_netmask, mgmt_ext_gateway,
             mgmt_ext_name_servers, proxy_url, proxy_username,
             proxy_password)
 
-        self._update_status('PXE booting OpenStack controller VM...')
+        self._update_status('PXE booting and installing the OpenStack controller VM...')
         self._dep_actions.start_openstack_vm()
 
         LOG.debug("Reading from console")
@@ -267,111 +286,86 @@ class Worker(object):
             else:
                 raise ex
 
+        # attach the rest of the NICs
         self._update_status('Rebooting OpenStack controller VM...')
-        self._dep_actions.reboot_openstack_vm()
+        final_nics = ["%s-mgmt_int" % vm_name, "%s-data" % vm_name, "%s-ext" % vm_name]
+        vm_network_config_final = []
+        for nic in vm_network_config:
+            if nic[1] in final_nics:
+                vm_network_config_final.append(nic)
+        LOG.info("Final VNIC Network config: %s " % vm_network_config_final)
+        self._dep_actions.poweroff_openstack_vm()
+        self._dep_actions.attach_nics(vm_name, vm_network_config_final)
+        self._dep_actions.start_openstack_vm()
 
         LOG.info("PXE booting done")
 
+        self._dep_actions.stop_httpd()
+
         vm_int_mgmt_ip = [vnic_ip[2] for vnic_ip in vnic_ip_info
-                          if vnic_ip[0] == "%s-mgmt-int" % vm_name][0]
+                          if vnic_ip[0] == "%s-mgmt_int" % vm_name][0]
 
         return (vm_int_mgmt_ip, vm_admin_user, ssh_key_path)
 
-    def _install_rdo(self, rdo_installer, host, ssh_key_path, username,
-                     password, rdo_admin_password, fip_range, fip_range_start,
-                     fip_range_end, fip_gateway, fip_name_servers):
+    def _install_kolla(self, kolla_installer, host, ssh_key_path, username,
+                     password, kolla_admin_password, fip_range, fip_range_start,
+                     fip_range_end, fip_gateway, hyperv_host_username, hyperv_host_password,
+                     windows_host_ip, fip_name_servers, ext_vswitch_name):
         reboot_sleep_s = 30
 
         def reboot_and_reconnect():
-            self._update_status('Rebooting RDO VM...')
-            rdo_installer.reboot()
+            self._update_status('Rebooting Kolla VM...')
+            kolla_installer.reboot()
 
             time.sleep(reboot_sleep_s)
 
             self._update_status(
-                'Enstablishing SSH connection with RDO VM...')
-            rdo_installer.connect(host, ssh_key_path, username, password,
+                'Enstablishing SSH connection with Kolla VM...')
+            kolla_installer.connect(host, ssh_key_path, username, password,
                                   self._term_type, self._term_cols,
                                   self._term_rows)
 
         try:
             self._update_status(
-                'Waiting for the RDO VM to reboot...')
+                'Waiting for the Kolla VM to reboot...')
             time.sleep(reboot_sleep_s)
 
             self._update_status(
-                'Enstablishing SSH connection with RDO VM...')
-            rdo_installer.connect(host, ssh_key_path, username, password,
+                'Enstablishing SSH connection with Kolla VM...')
+            kolla_installer.connect(host, ssh_key_path, username, password,
                                   self._term_type, self._term_cols,
                                   self._term_rows)
 
-            self._update_status('Updating RDO VM...')
-            rdo_installer.update_os()
-
-            self._update_status('Installing RDO...')
-            rdo_installer.install_rdo(rdo_admin_password, fip_range,
-                                      fip_range_start, fip_range_end,
-                                      fip_gateway, fip_name_servers)
-
-            self._update_status(
-                'Checking if rebooting the RDO VM is required...')
-            if rdo_installer.check_new_kernel():
-                reboot_and_reconnect()
-
-            self._update_status('Installing Hyper-V LIS components...')
-            rdo_installer.install_lis()
+            self._update_status('Configure network for Kolla VM...')
+            kolla_installer.configure_networking()
             reboot_and_reconnect()
 
-            self._update_status("Retrieving OpenStack configuration...")
-            nova_config = rdo_installer.get_nova_config()
+            self._update_status('Updating Kolla VM...')
+            kolla_installer.update_os()
+            reboot_and_reconnect()
 
-            self._update_status('RDO successfully deployed!')
+            self._update_status('Installing Kolla...')
+            kolla_installer.install_kolla(kolla_admin_password, fip_range,
+                                      fip_range_start, fip_range_end,
+                                      fip_gateway, hyperv_host_username, hyperv_host_password,
+                                      windows_host_ip, fip_name_servers, ext_vswitch_name)
 
-            return nova_config
+            self._update_status(
+                'Checking if rebooting the Kolla VM is required...')
+            if kolla_installer.check_new_kernel():
+                reboot_and_reconnect()
+
+            self._update_status('Kolla successfully deployed!')
+
+            self._dep_actions.restart_nova_neutron()
+
         finally:
-            rdo_installer.disconnect()
+            kolla_installer.disconnect()
 
-    def _install_local_hyperv_compute(self, nova_config,
-                                      openstack_base_dir, hyperv_host_username,
-                                      hyperv_host_password):
-        self._update_status('Checking if the OpenStack components for '
-                            'Hyper-V are already installed...')
-        for msi_info in self._dep_actions.check_installed_components():
-            self._update_status('Uninstalling %s' % msi_info[1])
-            self._dep_actions.uninstall_product(
-                msi_info[0], "uninstall_%s.log" % msi_info[1])
-
-        nova_msi_path = "hyperv_nova_compute.msi"
-        freerdp_webconnect_msi_path = "freerdp_webconnect.msi"
-        try:
-            self._update_status('Downloading Hyper-V OpenStack components...')
-            self._dep_actions.download_hyperv_compute_msi(nova_msi_path)
-
-            self._update_status('Installing Hyper-V OpenStack components...')
-            self._dep_actions.install_hyperv_compute(
-                nova_msi_path, nova_config, openstack_base_dir,
-                hyperv_host_username, hyperv_host_password)
-
-            self._update_status('Downloading FreeRDP-WebConnect...')
-            self._dep_actions.download_freerdp_webconnect_msi(
-                freerdp_webconnect_msi_path)
-
-            self._update_status('Installing FreeRDP-WebConnect...')
-            self._dep_actions.install_freerdp_webconnect(
-                freerdp_webconnect_msi_path, nova_config,
-                hyperv_host_username, hyperv_host_password)
-        finally:
-            if os.path.exists(nova_msi_path):
-                os.remove(nova_msi_path)
-            if os.path.exists(freerdp_webconnect_msi_path):
-                os.remove(freerdp_webconnect_msi_path)
-
-        self._update_status('Hyper-V OpenStack installed successfully')
-
-    def _validate_deployment(self, rdo_installer):
+    def _validate_deployment(self, kolla_installer):
         self._update_status('Validating OpenStack deployment...')
         # Skip for now
-        # rdo_installer.check_hyperv_compute_services(platform.node())
+        # kolla_installer.check_hyperv_compute_services(platform.node())
 
     def _get_default_openstack_base_dir(self):
         if sys.platform == 'win32':
@@ -575,7 +569,7 @@ class Worker(object):
             self._stop_progress_status()
 
     def _get_horizon_url(self, controller_ip):
-        # TODO(alexpilotti): This changes between Ubuntu and RDO
+        # TODO(alexpilotti): This changes between Ubuntu and Kolla
         return "http://%s" % controller_ip
 
     def open_horizon_url(self):
@@ -690,6 +684,9 @@ class Worker(object):
             hyperv_host_username = args.get("hyperv_host_username")
             hyperv_host_password = args.get("hyperv_host_password")
 
+            # HACK, this will need to be taken from GUI
+            windows_host_ip= '10.7.15.20'
+
             fip_range = str(netaddr.IPNetwork(args.get("fip_range")).cidr)
             fip_range_start = str(netaddr.IPAddress(
                 args.get("fip_range_start")))
@@ -703,7 +700,7 @@ class Worker(object):
             self._max_steps = 27
 
             self._dep_actions.check_platform_requirements()
-            rdo_installer = rdo.RDOInstaller(self._stdout_callback,
+            kolla_installer = kolla.KollaInstaller(self._stdout_callback,
                                              self._stderr_callback)
 
             (mgmt_ip, ssh_user, ssh_key_path) = self._deploy_openstack_vm(
@@ -712,25 +709,25 @@ class Worker(object):
                 admin_password, repo_url,
                 mgmt_ext_ip, mgmt_ext_netmask,
                 mgmt_ext_gateway, mgmt_ext_name_servers, proxy_url,
-                proxy_username, proxy_password)
+                proxy_username, proxy_password, windows_host_ip)
 
-            # Authenticate with the SSH key
-            ssh_password = None
-            # ssh_password = admin_password
+            # Authenticate with admin password since preseed does not
+            # make the ssh key persistent after initrd phase
+            ssh_key_path = None
+            ssh_password = admin_password
 
-            nova_config = self._install_rdo(rdo_installer, mgmt_ip,
-                                            ssh_key_path, ssh_user,
-                                            ssh_password, admin_password,
-                                            fip_range, fip_range_start,
-                                            fip_range_end, fip_gateway,
-                                            fip_name_servers)
-            LOG.debug("OpenStack config: %s" % nova_config)
+            self._install_kolla(kolla_installer, mgmt_ip,
+                                             ssh_key_path, ssh_user,
+                                             ssh_password, admin_password,
+                                             fip_range, fip_range_start,
+                                             fip_range_end, fip_gateway,
+                                             hyperv_host_username,
+                                             hyperv_host_password,
+                                             windows_host_ip,
+                                             fip_name_servers, ext_vswitch_name)
+            LOG.debug("OpenStack Controller deployed!")
 
-            self._install_local_hyperv_compute(nova_config,
-                                               openstack_base_dir,
-                                               hyperv_host_username,
-                                               hyperv_host_password)
-            self._validate_deployment(rdo_installer)
+            self._validate_deployment(kolla_installer)
 
             self._update_status('Your OpenStack deployment is ready!')
 

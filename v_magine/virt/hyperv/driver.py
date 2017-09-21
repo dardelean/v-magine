@@ -94,7 +94,7 @@ class HyperVDriver(base.BaseDriver):
                                            constants.IDE_DVD)
 
         for (vmswitch_name, vmnic_name, mac_address, pxe, allow_mac_spoofing,
-             access_vlan_id, trunk_vlan_ids, private_vlan_id) in vmnic_info:
+            access_vlan_id, trunk_vlan_ids, private_vlan_id) in vmnic_info:
             self._vmutils.create_nic(vm_name, vmnic_name, mac_address, pxe)
             self._netutils.connect_vnic_to_vswitch(vmswitch_name, vmnic_name)
             if allow_mac_spoofing:
@@ -108,6 +108,19 @@ class HyperVDriver(base.BaseDriver):
         if console_named_pipe:
             self._vmutils.set_vm_serial_port_connection(vm_name,
                                                         console_named_pipe)
+
+    def attach_vm_nics(self, vm_name, vmnic_info):
+        for (vmswitch_name, vmnic_name, mac_address, pxe, allow_mac_spoofing,
+            access_vlan_id, trunk_vlan_ids, private_vlan_id) in vmnic_info:
+            self._vmutils.create_nic(vm_name, vmnic_name, mac_address, pxe)
+            self._netutils.connect_vnic_to_vswitch(vmswitch_name, vmnic_name)
+            if allow_mac_spoofing:
+                self._netutils.set_vnic_port_security(
+                    vmnic_name, allow_mac_spoofing=allow_mac_spoofing)
+                if access_vlan_id or trunk_vlan_ids:
+                    self._netutils.set_vswitch_port_vlan_id(
+                        access_vlan_id, vmnic_name, trunk_vlan_ids,
+                        private_vlan_id)
 
     def start_vm(self, vm_name):
         self._vmutils.set_vm_state(vm_name, constants.HYPERV_VM_STATE_ENABLED)

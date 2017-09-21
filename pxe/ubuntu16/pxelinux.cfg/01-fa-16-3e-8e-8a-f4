@@ -1,0 +1,14 @@
+path boot-screens/
+include boot-screens/menu.cfg
+default boot-screens/vesamenu.c32
+prompt 0
+timeout 1
+ontimeout v-magine
+menu title PXE Network Boot
+menu hidden
+serial 0 115200
+
+label v-magine
+        menu label ^Install
+        kernel linux
+        append initrd=initrd.gz preseed/url=http://10.7.15.20/pxe/preseed.cfg DEBCONF_DEBUG=5 debian-installer/locale=en_US console-setup/layoutcode=us keyboard-configuration/modelcode=pc105 keyboard-configuration/layoutcode=us interface=eth0 auto=true priority=critical --

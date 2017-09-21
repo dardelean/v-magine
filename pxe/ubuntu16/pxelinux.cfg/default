@@ -1,0 +1,11 @@
+default boot-screens/vesamenu.c32
+prompt 0
+timeout 1
+ontimeout localhdd
+menu title PXE Network Boot
+menu hidden
+serial 0 115200
+
+label localhdd
+  COM32 boot-screens/chain.c32
+  APPEND hd0

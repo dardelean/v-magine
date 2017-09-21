@@ -1,0 +1,53 @@
+#!/bin/sh
+
+GRUB_FILE=/etc/default/grub
+
+sed -i '/TimeoutStartSec=/c\TimeoutStartSec=15sec' $GRUB_FILE
+
+/bin/cat << EOF > /etc/network/interfaces
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The primary network interface
+allow-hotplug enp0s10f0
+#iface enp0s10f0 inet dhcp
+
+# The primary network interface
+allow-hotplug eth0
+iface eth0 inet static
+    address {{ mgmt_ext_ip }}
+    netmask {{ mgmt_ext_netmask }}
+    gateway {{ mgmt_ext_gateway }}
+    dns-nameservers {{ mgmt_ext_dns1 }}
+
+allow-hotplug eth1
+iface eth1 inet dhcp
+
+allow-hotplug eth2
+iface eth2 inet dhcp
+
+allow-hotplug eth3
+iface eth3 inet dhcp
+EOF
+
+
+{% if proxy_url %}
+echo 'http_proxy="{{ proxy_url }}"' >> /etc/environment
+echo 'https_proxy="{{ proxy_url }}"' >> /etc/environment
+echo 'ftp_proxy="{{ proxy_url }}"' >> /etc/environment
+echo 'no_proxy=rdo.cloudbase,localhost,127.0.0.1' >> /etc/environment
+{% endif %}
+
+SSH_DIR=/root/.ssh
+if [ ! -d $SSH_DIR ]; then
+    mkdir $SSH_DIR
+    chmod 700 $SSH_DIR
+fi
+
+echo "{{ ssh_pub_key }}" >> $SSH_DIR/authorized_keys

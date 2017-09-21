@@ -1,0 +1,56 @@
+#!/bin/bash
+
+UDEV_NET_RULES=/etc/udev/rules.d/70-persistent-net.rules
+TIMEOUT_FILE=/etc/systemd/system/network-online.targets.wants/networking.service
+GRUB_FILE=/etc/default/grub
+
+sed -i '/GRUB_CMDLINE_LINUX=/c\GRUB_CMDLINE_LINUX="net.ifnames=0 biosdevname=0"' $GRUB_FILE
+update-grub
+
+/bin/echo 'SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="{{ mgmt_ext_mac_address }}", ATTR{type}=="1", KERNEL=="eth*", NAME="mgmt_ext"' > $UDEV_NET_RULES
+/bin/echo 'SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="{{ mgmt_int_mac_address }}", ATTR{type}=="1", KERNEL=="eth*", NAME="mgmt_int"' >> $UDEV_NET_RULES
+/bin/echo 'SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="{{ data_mac_address }}", ATTR{type}=="1", KERNEL=="eth*", NAME="data"' >> $UDEV_NET_RULES
+/bin/echo 'SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="{{ ext_mac_address }}", ATTR{type}=="1", KERNEL=="eth*", NAME="ext"' >> $UDEV_NET_RULES
+
+sed -i '/TimeoutStartSec=/c\TimeoutStartSec=15sec' $GRUB_FILE
+#sed -i '/TimeoutStartSec=/c\TimeoutStartSec=15sec' $TIMEOUT_FILE
+
+/bin/cat << EOF > /etc/network/interfaces
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The pxe network interface
+#allow-hotplug eth0
+#iface eth0 inet dhcp
+
+# The primary network interface
+auto mgmt_ext
+iface mgmt_ext inet static
+    address {{ mgmt_ext_ip }}
+    netmask {{ mgmt_ext_netmask }}
+    gateway {{ mgmt_ext_gateway }}
+    dns-nameservers {{ mgmt_ext_dns1 }}
+
+allow-hotplug mgmt_int
+iface mgmt_int inet dhcp
+
+allow-hotplug data
+iface data inet manual
+    up ip link set data up
+    up ip link set data promisc on
+    down ip link set data promisc off
+    down ip link set data down
+
+allow-hotplug ext
+iface ext inet manual
+    up ip link set ext up
+    up ip link set ext promisc on
+    down ip link set ext promisc off
+    down ip link set ext down
+EOF
